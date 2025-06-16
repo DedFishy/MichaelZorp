@@ -5,12 +5,37 @@ from PyQt5.QtWidgets import QApplication, QWidget, QPushButton
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPainter
 import speech_recognition as sr
-import multiprocessing
+from threading import Thread
+from yapper import Yapper, PiperSpeaker, PiperVoiceUS
+from markdown import Markdown
+from io import StringIO
+
+def unmark_element(element, stream=None):
+    if stream is None:
+        stream = StringIO()
+    if element.text:
+        stream.write(element.text)
+    for sub in element:
+        unmark_element(sub, stream)
+    if element.tail:
+        stream.write(element.tail)
+    return stream.getvalue()
+
+
+# patching Markdown
+Markdown.output_formats["plain"] = unmark_element
+__md = Markdown(output_format="plain")
+__md.stripTopLevelTags = False
+
+
+def unmark(text):
+    return __md.convert(text)
 
 images = {
     "Idle": "images/Idle.png",
     "Listening": "images/Listening.png",
-    "Think": "images/Think.png"
+    "Think": "images/Think.png",
+    "Yapping": "images/Yapping.png"
 }
 class Michael:
     # 0=Idle, 1=Listening, 2=Recognizing, 3=Generating, 4=Yapping
@@ -18,8 +43,8 @@ class Michael:
     def __init__(self):
 
         self.app = QApplication(sys.argv)
-        self.window = QPushButton("Michael Zorp")
-        self.window.setFixedSize(200, 200)
+        self.window = QPushButton("")
+        self.window.setFixedSize(128, 128)
         self.window.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.set_image("Idle")
         self.window.setAttribute(Qt.WA_TranslucentBackground)
@@ -29,31 +54,40 @@ class Michael:
         self.window.mouseReleaseEvent = self.mouseReleaseEvent
 
         self.start_position = None
+        self.moved = False
+
+        self.model = lms.llm()
+        self.chat = lms.Chat("You are an alien named Michael Zorp who has crash landed on Earth. You have been forced to become an assistant who answers human's questions, but you are not happy about it and portray your disgust with Earthlings in every response. Do not add formatting characters like asterisks or situation explainers. You must only respond with the dialogue of Michael Zorp.")
 
         self.source = sr.Microphone()
 
         self.r = sr.Recognizer()
 
-        self.pool = multiprocessing.Pool(os.cpu_count())
+        self.yapper = Yapper(speaker=PiperSpeaker(voice=PiperVoiceUS.DANNY))
+
 
         self.window.show()
 
         #with self.source:
-        #    self.r.adjust_for_ambient_noise(self.source, duration=5)
+        #    self.r.adjust_for_ambient_noise(self.source, duration=3)
 
     def mousePressEvent(self, event):
+        self.moved = False
         if event.button() == Qt.LeftButton:
             self.start_position = event.pos()
         elif event.button() == Qt.RightButton:
             self.window.close()
 
     def mouseMoveEvent(self, event):
+        self.moved = True
         if self.start_position is not None:
             delta = event.pos() - self.start_position
             self.window.move(self.window.pos() + delta)
 
     def mouseReleaseEvent(self, event):
+        if not self.moved: self.listen()
         self.start_position = None
+        self.moved = False
 
     def set_image(self, image_string):
         self.window.setStyleSheet(f"""
@@ -64,6 +98,7 @@ background-position: center;
 """)
 
     def listen_to_mic(self):
+        print("Listening to mic")
         with self.source:
             audio_data = self.r.record(self.source, duration=5)
         print("Recognizing")
@@ -72,15 +107,28 @@ background-position: center;
             text = self.r.recognize_google(audio_data)
         except sr.exceptions.UnknownValueError:
             text = ""
-        return text
+        self.prompt(text)
     
     def listen(self):
+        print("Listening")
         self.set_image("Listening")
-        self.pool.apply_async(self.listen_to_mic, callback=self.prompt)
+        Thread(target=self.listen_to_mic).start()
         
         
     def prompt(self, text):
-        print(text)
+        print("Adding chat message")
+        self.chat.add_user_message(text)
+        print("Generating response")
+        response = self.model.respond(
+            self.chat
+        )
+        print("Yapping")
+        self.set_image("Yapping")
+        self.yap(response.content)
+        self.set_image("Idle")
+
+    def yap(self, text):
+        self.yapper.yap(unmark(text))
 
     def run_window(self):
         self.app.exec()
